@@ -815,6 +815,8 @@ textarea{min-height:82px;resize:vertical}
 .leaflet-control-layers-toggle::after{content:"⧉";position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:20px;color:#0f172a}
 .reftip{background:#0f172a;color:#e5edf7;border:1px solid #334155;font-size:11px}
 .leaflet-tooltip.reftip::before{border-top-color:#0f172a}
+.reflabel{background:rgba(15,23,42,.82);color:#e5edf7;border:1px solid #475569;border-radius:6px;padding:1px 6px;font-size:11px;font-weight:600;white-space:nowrap;box-shadow:0 1px 4px #0007}
+.leaflet-tooltip.reflabel::before{display:none}
 </style>
 </head>
 <body>
@@ -870,18 +872,11 @@ textarea{min-height:82px;resize:vertical}
     <div class="hintchip" id="fHint">Trascina il segnalino sulla mappa per correggere la posizione.</div>
     <label class="fl">Categoria</label>
     <select id="fCat">
-      <option>Galleria Demonte</option>
-      <option>Viadotto Perdioni</option>
-      <option>Viadotto Cant</option>
-      <option>Rotatoria</option>
-      <option>Opere idrauliche</option>
-      <option>Rilevato / movimento terra</option>
-      <option>Interferenza / sottoservizi</option>
-      <option>Ricettore / ambiente</option>
-      <option>Accesso / area cantiere</option>
-      <option>Criticità / nota</option>
-      <option>Altro</option>
+      <option>Ricettore sensibile</option>
+      <option>Criticità per il cantiere</option>
+      <option value="Altro">Altro…</option>
     </select>
+    <input id="fCatOther" type="text" placeholder="Specifica la categoria" style="display:none;margin-top:8px">
     <label class="fl">Descrizione</label>
     <textarea id="fDesc" placeholder="Cosa osservi in questo punto…"></textarea>
     <label class="fl">Foto</label>
@@ -994,18 +989,22 @@ map.on("baselayerchange",function(e){activeBase=(e.name==="Satellite")?"sat":"os
 
 /* ---------------- reference layers ---------------- */
 var refGroups={}, refBounds=L.latLngBounds([]);
+var DEFAULT_OFF={pma:true};
 DATA.layers.forEach(function(ly){
   var g=L.layerGroup();
+  var permanent=(ly.id!=="pma");
   ly.features.forEach(function(f){
     if(!isFinite(f.lat)||!isFinite(f.lon))return;
     var m=L.circleMarker([f.lat,f.lon],{radius:7,color:"#0b1220",weight:2,fillColor:ly.colore,fillOpacity:1});
-    m.bindTooltip(f.titolo,{direction:"top",offset:[0,-6],className:"reftip"});
+    if(permanent) m.bindTooltip(f.titolo,{permanent:true,direction:"right",offset:[9,0],className:"reflabel"});
+    else m.bindTooltip(f.titolo,{direction:"top",offset:[0,-6],className:"reftip"});
     m.on("click",function(){openFeature(f,ly)});
     m.addTo(g);
     refBounds.extend([f.lat,f.lon]);
   });
-  g.addTo(map);
-  refGroups[ly.id]={group:g,meta:ly,visible:true};
+  var on=!DEFAULT_OFF[ly.id];
+  if(on) g.addTo(map);
+  refGroups[ly.id]={group:g,meta:ly,visible:on};
 });
 try{ if(refBounds.isValid()) map.fitBounds(refBounds.pad(0.15)); }catch(_){}
 
@@ -1032,7 +1031,7 @@ DATA.layers.forEach(function(ly){
   row.innerHTML='<span class="swatch" style="background:'+ly.colore+'"></span>'
     +'<span class="lyname">'+esc(ly.nome)+'</span>'
     +'<span class="lycount">'+ly.features.length+'</span>'
-    +'<span class="tgl on" data-ly="'+ly.id+'"><b></b></span>';
+    +'<span class="tgl'+(refGroups[ly.id].visible?" on":"")+'" data-ly="'+ly.id+'"><b></b></span>';
   lb.appendChild(row);
 });
 lb.addEventListener("click",function(e){
@@ -1155,7 +1154,7 @@ function resizePhoto(file){return new Promise(function(res){
 })}
 
 /* ---------------- save form ---------------- */
-var pendingMarker=null,pendingLatLng=null,pendingPhotos=[],editingId=null;
+var pendingMarker=null,pendingLatLng=null,pendingPhotos=[],editingId=null,editingTs=null,editingAcc=null;
 var mineIcon=function(){return L.divIcon({className:"",html:'<div style="width:16px;height:16px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:#16a34a;border:2px solid #052e16;box-shadow:0 1px 4px #0007"></div>',iconSize:[16,16],iconAnchor:[8,14]})};
 
 function bestPosition(){
@@ -1163,14 +1162,27 @@ function bestPosition(){
   var c=map.getCenter();return {lat:c.lat,lng:c.lng,acc:null,fromGps:false};
 }
 function openForm(latlng,fromGps,acc){
-  editingId=null;pendingPhotos=[];
+  editingId=null;editingTs=null;editingAcc=null;pendingPhotos=[];
   $("#formTitle").textContent="Nuovo rilievo";
-  $("#fCat").selectedIndex=0;$("#fDesc").value="";
+  $("#fCat").selectedIndex=0;$("#fCatOther").style.display="none";$("#fCatOther").value="";
+  $("#fDesc").value="";
   $("#fSaveBtn").textContent="Salva rilievo";
-  var old=$("#fSaveBtn").parentNode.querySelector(".btn.del");if(old)old.remove();
   setPending(latlng.lat,latlng.lng,acc);
-  $("#fHint").style.display=fromGps?"block":"block";
   $("#fHint").textContent=fromGps?"Posizione GPS acquisita. Trascina il segnalino per correggere.":"⚠︎ Posizione GPS non attiva: trascina il segnalino sul punto esatto.";
+  renderPhotos();
+  sheet("#sheetForm");
+}
+function openFormEdit(rec){
+  editingId=rec.id;editingTs=rec.ts;editingAcc=rec.acc;
+  $("#formTitle").textContent="Modifica rilievo";
+  $("#fSaveBtn").textContent="Salva modifiche";
+  var fixed=["Ricettore sensibile","Criticità per il cantiere"];
+  if(fixed.indexOf(rec.categoria)>-1){$("#fCat").value=rec.categoria;$("#fCatOther").style.display="none";$("#fCatOther").value="";}
+  else{$("#fCat").value="Altro";$("#fCatOther").style.display="block";$("#fCatOther").value=rec.categoria||"";}
+  $("#fDesc").value=rec.descrizione||"";
+  pendingPhotos=(rec.foto||[]).slice();
+  setPending(rec.lat,rec.lon,rec.acc);
+  $("#fHint").textContent="Modifica: trascina il segnalino per correggere la posizione.";
   renderPhotos();
   sheet("#sheetForm");
 }
@@ -1218,19 +1230,31 @@ function renderPhotos(){
   });
 }
 
+$("#fCat").addEventListener("change",function(){
+  var isAltro=$("#fCat").value==="Altro";
+  $("#fCatOther").style.display=isAltro?"block":"none";
+  if(isAltro) $("#fCatOther").focus();
+});
+function currentCategoria(){
+  if($("#fCat").value==="Altro"){var o=$("#fCatOther").value.trim();return o||"Altro";}
+  return $("#fCat").value;
+}
 $("#fSaveBtn").addEventListener("click",function(){
   if(!pendingLatLng){toast("Posizione mancante");return}
+  var now=new Date().toISOString();
   var rec={
     id: editingId||Date.now(),
-    categoria:$("#fCat").value,
+    categoria: currentCategoria(),
     descrizione:$("#fDesc").value.trim(),
     lat:pendingLatLng.lat, lon:pendingLatLng.lng,
-    acc: lastFix?lastFix.acc:null,
-    ts: new Date().toISOString(),
+    acc: editingId? editingAcc : (lastFix?lastFix.acc:null),
+    ts: editingId? (editingTs||now) : now,
     foto: pendingPhotos.slice()
   };
+  var wasEdit=!!editingId;
   dbPut(rec).then(function(){
-    clearPending();closeSheets();toast("Rilievo salvato");
+    clearPending();closeSheets();toast(wasEdit?"Rilievo aggiornato":"Rilievo salvato");
+    editingId=null;editingTs=null;editingAcc=null;
     refreshMine();
   }).catch(function(err){toast("Errore salvataggio: "+err)});
 });
@@ -1263,10 +1287,15 @@ function renderList(items){
       +(r.descrizione?'<div class="desc">'+esc(r.descrizione)+'</div>':'')
       +'<div class="co">'+r.lat.toFixed(6)+", "+r.lon.toFixed(6)+(r.acc?' · ±'+Math.round(r.acc)+'m':'')+'</div>'
       +(ph?'<div class="ph">'+ph+'</div>':'')
-      +'<div class="row"><button class="btn" data-go="'+r.id+'">Vai sulla mappa</button>'
+      +'<div class="row"><button class="btn" data-edit="'+r.id+'">Modifica</button>'
+      +'<button class="btn" data-go="'+r.id+'">Vai</button>'
       +'<button class="btn del" data-del="'+r.id+'">Elimina</button></div>';
     body.appendChild(card);
   });
+  body.querySelectorAll("[data-edit]").forEach(function(b){b.onclick=function(){
+    var r=items.find(function(x){return x.id==b.getAttribute("data-edit")});
+    if(r) openFormEdit(r);
+  }});
   body.querySelectorAll("[data-go]").forEach(function(b){b.onclick=function(){
     var r=items.find(function(x){return x.id==b.getAttribute("data-go")});
     closeSheets();map.setView([r.lat,r.lon],17);
