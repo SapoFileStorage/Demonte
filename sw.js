@@ -1,29 +1,39 @@
-const APP_CACHE="sopralluogo-app-v1";
-const TILE_CACHE="sopralluogo-tiles-v1";
-const SHELL=["./","./index.html","./manifest.webmanifest","./icon-192.png","./icon-512.png"];
+var VER="v3";
+var APP_CACHE="sopralluogo-app-"+VER;
+var TILE_CACHE="sopralluogo-tiles-v1";
 
-self.addEventListener("install",function(e){
-  e.waitUntil(caches.open(APP_CACHE).then(function(c){return c.addAll(SHELL)}).then(function(){return self.skipWaiting()}));
-});
+self.addEventListener("install",function(e){ self.skipWaiting(); });
+
 self.addEventListener("activate",function(e){
   e.waitUntil(caches.keys().then(function(keys){
-    return Promise.all(keys.map(function(k){if(k!==APP_CACHE&&k!==TILE_CACHE)return caches.delete(k)}));
-  }).then(function(){return self.clients.claim()}));
+    return Promise.all(keys.map(function(k){
+      if(k!==APP_CACHE && k!==TILE_CACHE) return caches.delete(k);
+    }));
+  }).then(function(){ return self.clients.claim(); }));
 });
+
 self.addEventListener("fetch",function(e){
   var url=e.request.url;
-  if(url.indexOf("tile.openstreetmap.org")>-1||url.indexOf("server.arcgisonline.com")>-1){
+  // Map tiles: cache-first (for offline maps)
+  if(url.indexOf("tile.openstreetmap.org")>-1 || url.indexOf("server.arcgisonline.com")>-1){
     e.respondWith(caches.open(TILE_CACHE).then(function(c){
       return c.match(e.request).then(function(hit){
-        if(hit)return hit;
-        return fetch(e.request).then(function(resp){try{c.put(e.request,resp.clone())}catch(_){}return resp;}).catch(function(){return hit;});
+        return hit || fetch(e.request).then(function(r){try{c.put(e.request,r.clone())}catch(_){}return r;}).catch(function(){return hit;});
       });
     }));
     return;
   }
-  if(e.request.mode==="navigate"){
-    e.respondWith(caches.match("./index.html").then(function(r){return r||fetch(e.request)}));
-    return;
-  }
-  e.respondWith(caches.match(e.request).then(function(r){return r||fetch(e.request)}));
+  // App shell: NETWORK-FIRST so an updated page is always used when online;
+  // fall back to cache only when offline.
+  if(e.request.method!=="GET"){ return; }
+  e.respondWith(
+    fetch(e.request).then(function(r){
+      caches.open(APP_CACHE).then(function(c){try{c.put(e.request,r.clone())}catch(_){}});
+      return r;
+    }).catch(function(){
+      return caches.match(e.request).then(function(m){
+        return m || (e.request.mode==="navigate" ? caches.match("./index.html") : undefined);
+      });
+    })
+  );
 });
