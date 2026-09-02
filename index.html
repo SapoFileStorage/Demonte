@@ -903,6 +903,7 @@ textarea{min-height:82px;resize:vertical}
   <div class="body">
     <div style="display:flex;flex-direction:column;gap:10px">
       <button class="btn save" id="expGeo">⤓ Esporta rilievi (GeoJSON per QGIS)</button>
+      <button class="btn" id="expKmz">⤓ Esporta KMZ (Google Earth)</button>
       <button class="btn" id="expRep">⤓ Esporta report con foto (HTML/PDF)</button>
       <button class="btn" id="btnOffline">⤓ Scarica mappa offline (zona tracciato)</button>
       <div id="offProg" style="font-size:12px;color:var(--muted);padding:0 2px"></div>
@@ -1313,7 +1314,68 @@ $("#btnList").addEventListener("click",function(){openList()});
 
 /* ---------------- exports ---------------- */
 function blobToDataURL(b){return new Promise(function(res){var r=new FileReader();r.onload=function(){res(r.result)};r.readAsDataURL(b)})}
+function blobToU8(b){return new Promise(function(res){var r=new FileReader();r.onload=function(){res(new Uint8Array(r.result))};r.readAsArrayBuffer(b)})}
 function download(name,blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000)}
+
+/* --- minimal STORED-only ZIP writer (for KMZ, no external libs) --- */
+var CRCTAB=(function(){var t=new Uint32Array(256);for(var n=0;n<256;n++){var c=n;for(var k=0;k<8;k++)c=c&1?(0xEDB88320^(c>>>1)):(c>>>1);t[n]=c>>>0;}return t;})();
+function crc32(u8){var crc=~0>>>0;for(var i=0;i<u8.length;i++)crc=(crc>>>8)^CRCTAB[(crc^u8[i])&0xff];return (~crc)>>>0;}
+function u16(v){return [v&0xff,(v>>>8)&0xff];}
+function u32(v){v=v>>>0;return [v&0xff,(v>>>8)&0xff,(v>>>16)&0xff,(v>>>24)&0xff];}
+function buildZip(files){
+  var chunks=[],offset=0,central=[],enc=new TextEncoder();
+  files.forEach(function(f){
+    var name=enc.encode(f.name),crc=crc32(f.data),sz=f.data.length;
+    var lh=new Uint8Array([].concat(u32(0x04034b50),u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(sz),u32(sz),u16(name.length),u16(0)));
+    var lo=offset; chunks.push(lh,name,f.data); offset+=lh.length+name.length+sz;
+    var cd=new Uint8Array([].concat(u32(0x02014b50),u16(20),u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(sz),u32(sz),u16(name.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(lo)));
+    central.push({hdr:cd,name:name});
+  });
+  var cdStart=offset,cdLen=0;
+  central.forEach(function(c){chunks.push(c.hdr,c.name);var l=c.hdr.length+c.name.length;offset+=l;cdLen+=l;});
+  chunks.push(new Uint8Array([].concat(u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(cdLen),u32(cdStart),u16(0))));
+  var total=chunks.reduce(function(a,c){return a+c.length;},0),out=new Uint8Array(total),p=0;
+  chunks.forEach(function(c){out.set(c,p);p+=c.length;});
+  return out;
+}
+var KMLCOLORS=["ffc89600","ff2828dc","ff00a0f5","ffed3a7c","ff4aa316","ffc78402"];
+function pad2(n){return ("0"+n).slice(-2);}
+
+$("#expKmz").addEventListener("click",function(){
+  dbAll().then(function(items){
+    if(!items.length){toast("Nessun rilievo da esportare");return}
+    toast("Preparo il KMZ…");
+    var cats=[]; items.forEach(function(r){var c=r.categoria||"Altro";if(cats.indexOf(c)<0)cats.push(c);});
+    var files=[],tasks=[],placemarks=[];
+    items.forEach(function(r,idx){
+      var i=idx+1,imgs="",cat=r.categoria||"Altro";
+      (r.foto||[]).forEach(function(blob,k){
+        var name="files/r"+pad2(i)+"_"+(k+1)+".jpg";
+        imgs+='<img src="'+name+'" width="400" style="margin-top:6px"/><br/>';
+        tasks.push(blobToU8(blob).then(function(u8){files.push({name:name,data:u8});}));
+      });
+      var body='<div style="font-family:sans-serif;max-width:420px"><b>'+esc(cat)+'</b><br/>'
+        +'<span style="color:#555">'+esc(r.descrizione||"")+'</span><br/>'
+        +'<span style="color:#888;font-size:11px">'+esc(r.ts||"")+'</span><br/>'+imgs+'</div>';
+      placemarks.push('<Placemark><name>'+esc(r.descrizione?r.descrizione:cat)+'</name>'
+        +'<styleUrl>#cat'+cats.indexOf(cat)+'</styleUrl>'
+        +'<description><![CDATA['+body+']]></description>'
+        +'<Point><coordinates>'+r.lon.toFixed(7)+','+r.lat.toFixed(7)+',0</coordinates></Point></Placemark>');
+    });
+    Promise.all(tasks).then(function(){
+      var styles="";
+      cats.forEach(function(c,i){styles+='<Style id="cat'+i+'"><IconStyle><color>'+KMLCOLORS[i%KMLCOLORS.length]
+        +'</color><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png</href></Icon>'
+        +'</IconStyle><BalloonStyle><text><![CDATA[$[description]]]></text></BalloonStyle></Style>';});
+      var kml='<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
+        +'<name>Rilievi sopralluogo Demonte</name>'+styles+placemarks.join("")+'</Document></kml>';
+      files.push({name:"doc.kml",data:new TextEncoder().encode(kml)});
+      var zip=buildZip(files);
+      download("Rilievi_Demonte_"+dmY()+".kmz",new Blob([zip],{type:"application/vnd.google-earth.kmz"}));
+      toast("KMZ esportato ("+placemarks.length+" punti)");
+    }).catch(function(err){toast("Errore KMZ: "+err);});
+  });
+});
 
 $("#expGeo").addEventListener("click",function(){
   dbAll().then(function(items){
